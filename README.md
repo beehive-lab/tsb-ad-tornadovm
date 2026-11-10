@@ -84,7 +84,36 @@ few of the k nearest in double precision. Windows up to 320 points and k up to 1
 
 ## Validation and benchmark
 
-RESULTS
+NVIDIA A100 (80 GB PCIe, CUDA/PTX backend, TornadoVM 8.1, JDK 25) against TSB-AD's CPU detectors on a
+128-core Arm Neoverse-N1 host (OpenBLAS and OpenMP limited to 64 threads), on 10 files of TSB-AD-U's
+evaluation list: NAB 2, WSD 2, Stock 2, MSL 1, Daphnet 1 and MITDB 2 (1,000 to 650,000 points).
+Both sides score the same files with the same hyperparameters; the CPU scores come from
+`python/run_reference.py` (here from the PyTorch branch's validation run, which writes the same files).
+
+| | Sub_PCA | Sub_KNN | KMeansAD_U | MatrixProfile |
+|:--|--:|--:|--:|--:|
+| score correlation, min / median | 1.0 / 1.0 | 1.0 / 1.0 | 0.75 / 0.988 | 1.0 / 1.0 |
+| mean VUS-PR, CPU / TornadoVM | 0.3488 / 0.3488 | 0.4165 / 0.4165 | 0.3653 / 0.3633 | 0.2490 / 0.2492 |
+| largest abs. VUS-PR difference | 9.9e-8 | 3.9e-5 | 0.033 | 1.8e-3 |
+| ... after rounding scores to 1e-6 | 2.4e-7 | 0 | 0.033 | 6.6e-7 |
+| CPU time (s) | 106.4 | 312.4 | 943.8 | 171.7 |
+| TornadoVM time, warm (s) | 0.17 | 74.3 | 1.63 | 6.98 |
+| TornadoVM time, first run with JIT (s) | 2.54 | 76.6 | 4.20 | 8.62 |
+| speedup, warm | 634x | 4.2x | 577x | 25x |
+| speedup, first run | 42x | 4.1x | 225x | 20x |
+| PyTorch on the same GPU, speedup | 13.8x | 4.5x | 96x | 7.6x |
+
+KMeansAD_U's differences come from its random seeding: two CPU runs with different seeds differ by
+0.015 VUS-PR on average. MatrixProfile's one larger difference (MSL, window 240) is a near tie that
+rounding to 1e-6 removes.
+
+The Java VUS, run on the CPU scores, agrees with TSB-AD's VUS on the same scores to 7.4e-7 (VUS-PR and
+VUS-ROC, all 40 file x detector pairs); it takes 10 to 220 ms per series, against seconds to minutes for
+TSB-AD's CPU implementation.
+
+Sub-PCA's warm time is small because the O(N m) covariance and the eigendecomposition run on the host in
+double precision and only the scoring runs on the device. Sub-KNN is dominated by the two 500k and 650k
+point MITDB series, where the exact brute-force search does N^2 m work.
 
 ## Limitations
 
