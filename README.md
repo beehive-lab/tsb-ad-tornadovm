@@ -101,7 +101,15 @@ Both sides score the same files with the same hyperparameters; the CPU scores co
 | TornadoVM time, first run with JIT (s) | 2.54 | 76.6 | 4.20 | 8.62 |
 | speedup, warm | 634x | 4.2x | 577x | 25x |
 | speedup, first run | 42x | 4.1x | 225x | 20x |
-| PyTorch on the same GPU, speedup | 13.8x | 4.5x | 96x | 7.6x |
+| PyTorch branch on the same GPU, speedup (single call) | 13.8x | 4.5x | 96x | 7.6x |
+
+The PyTorch row is not a framework comparison. The two versions share the detectors' definitions but
+not their algorithms: the PyTorch branch uses standard tensor operations only, so it builds the window
+matrix and computes Sub-PCA's covariance and the matrix profile with GEMMs (O(N m^2) and O(N^2 m)), while
+the TornadoVM kernels use the Hankel covariance recurrence (O(N m)), the SCAMP diagonal recurrence (O(N^2))
+and read windows straight from the series. Timings also differ: TornadoVM's warm time is the best of
+repeated runs in one process, the PyTorch time a single call including allocation and transfers. Sub-KNN,
+where both do the same brute-force work, runs at the same speed on both.
 
 KMeansAD_U's differences come from its random seeding: two CPU runs with different seeds differ by
 0.015 VUS-PR on average. MatrixProfile's one larger difference (MSL, window 240) is a near tie that
