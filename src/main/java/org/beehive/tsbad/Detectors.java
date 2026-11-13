@@ -26,10 +26,23 @@ public final class Detectors {
 
     private static final int LOCAL = 256;
 
-    /** A detector bound to one series. */
+    /**
+     * A detector bound to one series. Sub-PCA, Sub-KNN and MatrixProfile can be rebound to another series of the
+     * same length, which reuses their device buffers and compiled execution plan.
+     */
     public interface Detector extends AutoCloseable {
         /** Point anomaly scores, one per sample, like the CPU detector's decision_scores_. */
         double[] score();
+
+        /** Whether {@link #rebind} is supported. */
+        default boolean reusable() {
+            return false;
+        }
+
+        /** Binds the detector to another series of the same length; its next {@link #score()} scores that one. */
+        default void rebind(double[] x) {
+            throw new UnsupportedOperationException(getClass().getSimpleName() + " cannot be rebound");
+        }
 
         @Override
         void close();
@@ -72,11 +85,20 @@ public final class Detectors {
 
     /** Series minus its mean, as float (the detectors are shift invariant). */
     static FloatArray centred(double[] x, double mean) {
-        FloatArray a = new FloatArray(x.length);
+        return centredInto(new FloatArray(x.length), x, mean);
+    }
+
+    static FloatArray centredInto(FloatArray a, double[] x, double mean) {
         for (int i = 0; i < x.length; i++) {
             a.set(i, (float) (x[i] - mean));
         }
         return a;
+    }
+
+    static void checkLength(double[] x, int n) {
+        if (x.length != n) {
+            throw new IllegalArgumentException("Rebinding needs a series of " + n + " points; got " + x.length + ".");
+        }
     }
 
     /** Pads window scores to n points: first value ceil((w - 1) / 2) times in front, last (w - 1) / 2 behind. */
@@ -100,26 +122,68 @@ public final class Detectors {
         private final int n;
         private final int m;
         private final int N;
+        private final int excl;
         private final boolean[] constant;
         private final boolean[] constFar;
         private final FloatArray best;
         private final IntArray bestIdx;
         private final double[] xd;
         private final double[] mu;
+        private final double[] inv;
+        private final FloatArray xc;
+        private final FloatArray xlo;
+        private final FloatArray muLo;
+        private final FloatArray muD;
+        private final FloatArray invD;
+        private final FloatArray df;
+        private final FloatArray dg;
         private final TornadoExecutionPlan plan;
 
         public MatrixProfile(double[] x, int m) {
             this.n = x.length;
             this.m = m;
             this.N = n - m + 1;
-            double g = mean(x);
+            this.excl = (int) Math.ceil(m / 4.0);
             xd = new double[n];
+            mu = new double[N];
+            inv = new double[N];
+            constant = new boolean[N];
+            constFar = new boolean[N];
+            xc = new FloatArray(n);
+            xlo = new FloatArray(n);
+            muLo = new FloatArray(N);
+            muD = new FloatArray(N);
+            invD = new FloatArray(N);
+            df = new FloatArray(N);
+            dg = new FloatArray(N);
+            best = new FloatArray(N);
+            bestIdx = new IntArray(N);
+            load(x);
+            TaskGraph tg = new TaskGraph("mp") //
+                    .transferToDevice(DataTransferMode.EVERY_EXECUTION, xc, xlo, muD, muLo, invD, df, dg) //
+                    .task("rowmax", Kernels::mpRowMax, new KernelContext(), xc, xlo, muD, muLo, invD, df, dg, best, bestIdx, N, m, excl) //
+                    .transferToHost(DataTransferMode.EVERY_EXECUTION, best, bestIdx);
+            GridScheduler gs = new GridScheduler();
+            gs.addWorkerGrid("mp.rowmax", Grids.grid1(Grids.roundUp(N, Kernels.MP_T), Kernels.MP_T));
+            plan = plan(gs, tg);
+        }
+
+        @Override
+        public boolean reusable() {
+            return true;
+        }
+
+        @Override
+        public void rebind(double[] x) {
+            checkLength(x, n);
+            load(x);
+        }
+
+        private void load(double[] x) {
+            double g = mean(x);
             for (int i = 0; i < n; i++) {
                 xd[i] = x[i] - g;
             }
-            mu = new double[N];
-            double[] inv = new double[N];
-            constant = new boolean[N];
             IntStream.range(0, N).parallel().forEach(i -> {
                 double s = 0;
                 double mn = Double.POSITIVE_INFINITY;
@@ -140,42 +204,32 @@ public final class Detectors {
                 constant[i] = mn == mx;
                 inv[i] = constant[i] || q == 0 ? 0 : 1 / Math.sqrt(q);
             });
-            int excl = (int) Math.ceil(m / 4.0);
             // a constant subsequence is at distance 0 from another constant one and sqrt(m) from the rest
             int[] cum = new int[N + 1];
             for (int i = 0; i < N; i++) {
                 cum[i + 1] = cum[i] + (constant[i] ? 1 : 0);
             }
-            constFar = new boolean[N];
             for (int i = 0; i < N; i++) {
                 int lo = Math.max(0, i - excl);
                 int hi = Math.min(N, i + excl + 1);
                 constFar[i] = cum[N] - (cum[hi] - cum[lo]) > 0;
             }
-            FloatArray xc = centred(xd, 0);
-            FloatArray xlo = remainder(xd);
-            FloatArray muLo = remainder(mu);
-            FloatArray muD = new FloatArray(N);
-            FloatArray invD = new FloatArray(N);
-            FloatArray df = new FloatArray(N);
-            FloatArray dg = new FloatArray(N);
+            centredInto(xc, xd, 0);
+            for (int i = 0; i < n; i++) {
+                xlo.set(i, (float) (xd[i] - (float) xd[i]));
+            }
             for (int i = 0; i < N; i++) {
+                muLo.set(i, (float) (mu[i] - (float) mu[i]));
                 muD.set(i, (float) mu[i]);
                 invD.set(i, (float) inv[i]);
                 if (i > 0) {
                     df.set(i, (float) ((xd[i + m - 1] - xd[i - 1]) / 2));
                     dg.set(i, (float) ((xd[i + m - 1] - mu[i]) + (xd[i - 1] - mu[i - 1])));
+                } else {
+                    df.set(0, 0f);
+                    dg.set(0, 0f);
                 }
             }
-            best = new FloatArray(N);
-            bestIdx = new IntArray(N);
-            TaskGraph tg = new TaskGraph("mp") //
-                    .transferToDevice(DataTransferMode.FIRST_EXECUTION, xc, xlo, muD, muLo, invD, df, dg) //
-                    .task("rowmax", Kernels::mpRowMax, new KernelContext(), xc, xlo, muD, muLo, invD, df, dg, best, bestIdx, N, m, excl) //
-                    .transferToHost(DataTransferMode.EVERY_EXECUTION, best, bestIdx);
-            GridScheduler gs = new GridScheduler();
-            gs.addWorkerGrid("mp.rowmax", Grids.grid1(Grids.roundUp(N, Kernels.MP_T), Kernels.MP_T));
-            plan = plan(gs, tg);
         }
 
         @Override
@@ -233,7 +287,7 @@ public final class Detectors {
 
     /** TSB-AD's Sub-PCA (models.PCA with its defaults): all components, weighted by explained variance. */
     public static final class SubPca implements Detector {
-        private final double[] x;
+        private double[] x;
         private final int n;
         private final int m;
         private final int N;
@@ -244,7 +298,7 @@ public final class Detectors {
         private final FloatArray invW;
         private final FloatArray out;
         private final TornadoExecutionPlan plan;
-        private final double shift;
+        private double shift;
 
         public SubPca(double[] x, int m) {
             this.x = x;
@@ -259,13 +313,25 @@ public final class Detectors {
             invW = new FloatArray(m);
             out = new FloatArray(N);
             TaskGraph tg = new TaskGraph("pca") //
-                    .transferToDevice(DataTransferMode.FIRST_EXECUTION, xc) //
-                    .transferToDevice(DataTransferMode.EVERY_EXECUTION, colMu, colInv, v, invW) //
+                    .transferToDevice(DataTransferMode.EVERY_EXECUTION, xc, colMu, colInv, v, invW) //
                     .task("score", Kernels::pcaScore, new KernelContext(), xc, colMu, colInv, v, invW, out, N, m, m) //
                     .transferToHost(DataTransferMode.EVERY_EXECUTION, out);
             GridScheduler gs = new GridScheduler();
             gs.addWorkerGrid("pca.score", Grids.grid1(Grids.roundUp(N, LOCAL), LOCAL));
             plan = plan(gs, tg);
+        }
+
+        @Override
+        public boolean reusable() {
+            return true;
+        }
+
+        @Override
+        public void rebind(double[] x) {
+            checkLength(x, n);
+            this.x = x;
+            this.shift = mean(x);
+            centredInto(xc, x, shift);
         }
 
         @Override
@@ -649,6 +715,8 @@ public final class Detectors {
         private final IntArray outIdx;
         private final double[] xd;
         private final double[] inv2d;
+        private final FloatArray xc;
+        private final FloatArray inv2;
         private final TornadoExecutionPlan plan;
 
         public SubKnn(double[] x, int m, int k) {
@@ -659,14 +727,39 @@ public final class Detectors {
             this.m = m;
             this.N = n - m + 1;
             this.k = k;
-            double g = mean(x);
             xd = new double[n];
+            inv2d = new double[m];
+            xc = new FloatArray(n);
+            inv2 = new FloatArray(m);
+            load(x);
+            out = new FloatArray(N * k);
+            outIdx = new IntArray(N * k);
+            TaskGraph tg = new TaskGraph("knn") //
+                    .transferToDevice(DataTransferMode.EVERY_EXECUTION, xc, inv2) //
+                    .task("topk", Kernels::knnTopK, new KernelContext(), xc, inv2, out, outIdx, N, m, k) //
+                    .transferToHost(DataTransferMode.EVERY_EXECUTION, out, outIdx);
+            GridScheduler gs = new GridScheduler();
+            gs.addWorkerGrid("knn.topk", Grids.grid1(Grids.roundUp(N, Kernels.KNN_T), Kernels.KNN_T));
+            plan = plan(gs, tg);
+        }
+
+        @Override
+        public boolean reusable() {
+            return true;
+        }
+
+        @Override
+        public void rebind(double[] x) {
+            checkLength(x, n);
+            load(x);
+        }
+
+        private void load(double[] x) {
+            double g = mean(x);
             for (int i = 0; i < n; i++) {
                 xd[i] = x[i] - g;
             }
-            inv2d = new double[m];
             // column z-score (axis 0, ddof 0) of the window matrix: only the column scales matter
-            FloatArray inv2 = new FloatArray(m);
             IntStream.range(0, m).parallel().forEach(a -> {
                 double s = 0;
                 for (int i = 0; i < N; i++) {
@@ -682,16 +775,7 @@ public final class Detectors {
                 inv2d[a] = var > 0 ? 1 / var : 0;
                 inv2.set(a, (float) inv2d[a]);
             });
-            FloatArray xc = centred(xd, 0);
-            out = new FloatArray(N * k);
-            outIdx = new IntArray(N * k);
-            TaskGraph tg = new TaskGraph("knn") //
-                    .transferToDevice(DataTransferMode.FIRST_EXECUTION, xc, inv2) //
-                    .task("topk", Kernels::knnTopK, new KernelContext(), xc, inv2, out, outIdx, N, m, k) //
-                    .transferToHost(DataTransferMode.EVERY_EXECUTION, out, outIdx);
-            GridScheduler gs = new GridScheduler();
-            gs.addWorkerGrid("knn.topk", Grids.grid1(Grids.roundUp(N, Kernels.KNN_T), Kernels.KNN_T));
-            plan = plan(gs, tg);
+            centredInto(xc, xd, 0);
         }
 
         @Override
