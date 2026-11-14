@@ -12,6 +12,10 @@ benchmark:
 | `Detectors.KMeansAd` | `KMeansAD_U` | k-means++ distances, Lloyd assignment and centroid sums |
 | `Detectors.SubKnn` | `Sub_KNN` (method `largest`) | exact brute-force k nearest windows |
 
+`CpuDetectors` and `CpuVus` compute the same detectors and VUS in double precision on the CPU, with the device
+steps replaced by loops over all cores: a reference, and a fallback when no device is available. Sub-KNN and
+MatrixProfile do O(N^2 m) and O(N^2) work there.
+
 The detectors take TSB-AD's tuned univariate hyperparameters and reproduce TSB-AD's windowing,
 normalisation, padding and scoring, so their scores can be compared value by value with the Python
 originals. A PyTorch GPU version of the same pieces (CUDA or Apple MPS) is on the
