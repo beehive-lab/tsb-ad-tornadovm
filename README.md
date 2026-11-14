@@ -21,8 +21,8 @@ All kernels use TornadoVM's `KernelContext` API with explicit work-group sizes.
 
 ## Build and run
 
-Needs JDK 21+, TornadoVM 8.1 (any backend: OpenCL, PTX, SPIR-V or Metal) and, for validation, Python with
-the `TSB-AD` package.
+Needs JDK 22 or newer (tested with JDK 25), TornadoVM 8.1.0 with `TORNADOVM_HOME` set (any backend: OpenCL,
+PTX (CUDA), SPIR-V or Metal; tested with PTX) and, for validation, Python with the `TSB-AD` package.
 
 ```bash
 ./mvnw -q compile
@@ -35,6 +35,26 @@ to `out/DET/FILE.f64` (little-endian float64) and one line per file and detector
 first-run time (includes JIT compilation), best warm time (`--repeat`), VUS time and VUS-PR / VUS-ROC.
 With `--ref-dir REF` it also scores `REF/DET/FILE.f64`, the output of another implementation, so the metric
 can be checked on identical input.
+
+From Java, each detector is bound to one series. Sub-PCA, Sub-KNN and MatrixProfile can be rebound to
+another series of the same length, which reuses their device buffers and compiled execution plan:
+
+```java
+try (Detectors.Detector d = new Detectors.SubPca(x, window)) {
+    double[] scores = d.score();
+    if (d.reusable()) {
+        d.rebind(y);              // same length as x
+        double[] next = d.score();
+    }
+}
+```
+
+To use it as a library from another Maven project,
+install it into the local Maven repository as `io.github.beehive-lab:tsb-ad-tornadovm:0.1.0-SNAPSHOT`:
+
+```bash
+./mvnw -q install -DskipTests
+```
 
 The full comparison with TSB-AD:
 
