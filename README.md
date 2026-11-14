@@ -21,8 +21,8 @@ All kernels use TornadoVM's `KernelContext` API with explicit work-group sizes.
 
 ## Build and run
 
-Needs JDK 22 or newer (tested with JDK 25), TornadoVM 8.1.0 with `TORNADOVM_HOME` set (any backend: OpenCL,
-PTX (CUDA), SPIR-V or Metal; tested with PTX) and, for validation, Python with the `TSB-AD` package.
+Needs JDK 22 or newer (tested with JDK 25), TornadoVM 8.1.0 with `TORNADOVM_HOME` set (any backend: CUDA,
+OpenCL or Metal; tested with CUDA) and, for validation, Python with the `TSB-AD` package.
 
 ```bash
 ./mvnw -q compile
@@ -104,7 +104,7 @@ few of the k nearest in double precision. Windows up to 320 points and k up to 1
 
 ## Validation and benchmark
 
-NVIDIA A100 (80 GB PCIe, CUDA/PTX backend, TornadoVM 8.1, JDK 25) against TSB-AD's CPU detectors on a
+NVIDIA A100 (80 GB PCIe, CUDA backend, TornadoVM 8.1.0, JDK 25) against TSB-AD's CPU detectors on a
 128-core Arm Neoverse-N1 host (OpenBLAS and OpenMP limited to 64 threads), on 10 files of TSB-AD-U's
 evaluation list: NAB 2, WSD 2, Stock 2, MSL 1, Daphnet 1 and MITDB 2 (1,000 to 650,000 points).
 Both sides score the same files with the same hyperparameters; the CPU scores come from
